@@ -3440,6 +3440,9 @@ class GenerationMixin(ContinuousMixin):
             `return_dict_in_generate=True` or a [`~generation.GenerateEncoderDecoderOutput`] if
             `model.config.is_encoder_decoder=True`.
         """
+        # [DEBUG|@jamesnulliu]
+        print("[DEBUG] Greedy/Sample Generation")
+
         # init values
         pad_token_id = generation_config._pad_token_tensor
         output_attentions = generation_config.output_attentions
@@ -3449,6 +3452,8 @@ class GenerationMixin(ContinuousMixin):
         return_dict_in_generate = generation_config.return_dict_in_generate
         has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
         do_sample = generation_config.do_sample
+        soft_thinking = generation_config.soft_thinking
+        top_k = generation_config.top_k
 
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
@@ -3523,7 +3528,7 @@ class GenerationMixin(ContinuousMixin):
             next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32, device=input_ids.device)
 
             # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
+            next_token_scores = logits_processor(input_ids, next_token_logits)  # [B, V]
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -3545,11 +3550,26 @@ class GenerationMixin(ContinuousMixin):
                         else (outputs.hidden_states,)
                     )
 
+            if soft_thinking:
+                probs = nn.functional.softmax(next_token_scores, dim=-1)  # [B, V]
+                # topk_probs: [B, K], topk_ids: [B, K]
+                topk_probs, topk_ids = torch.topk(probs, dim=-1, k=top_k)
+                model_kwargs["topk_probs"] = topk_probs  # [B, K]
+                model_kwargs["topk_ids"] = topk_ids  # [B, K]
+
             # token selection
             if do_sample:
-                probs = nn.functional.softmax(next_token_scores, dim=-1)
-                # TODO (joao): this OP throws "skipping cudagraphs due to ['incompatible ops']", find solution
-                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                # Sample from topk candidates if soft_thinking
+                if soft_thinking:
+                    assert top_k >= 1, "Only supported when top_k >= 1"
+                    # Select 1 token from topk_probs
+                    selected_idx = torch.multinomial(topk_probs, num_samples=1)  # [B, 1]
+                    # Use torch.gather to get the final token IDs
+                    next_tokens = torch.gather(topk_ids, dim=1, index=selected_idx).squeeze(1) # [B, 1]
+                else:
+                    probs = nn.functional.softmax(next_token_scores, dim=-1)
+                    # TODO (joao): this OP throws "skipping cudagraphs due to ['incompatible ops']", find solution
+                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
             else:
                 next_tokens = torch.argmax(next_token_scores, dim=-1)
 
@@ -3752,11 +3772,12 @@ class GenerationMixin(ContinuousMixin):
         batch_modified_indices = topk_current_beam_indices + batch_offset
         topk_running_beam_indices[:, :, cur_len - decoder_prompt_len] = batch_modified_indices
 
-        return topk_log_probs, topk_running_sequences, topk_running_beam_indices
+        return topk_log_probs, topk_running_sequences, topk_running_beam_indices, topk_ids
 
     def _get_running_beams_for_next_iteration(
         self,
         topk_log_probs: torch.Tensor,
+        topk_ids: torch.Tensor,
         topk_running_sequences: torch.Tensor,
         topk_running_beam_indices: torch.Tensor,
         next_token_hits_stopping_criteria: torch.Tensor,
@@ -3773,8 +3794,9 @@ class GenerationMixin(ContinuousMixin):
         next_topk_indices = torch.topk(topk_running_log_probs, k=num_beams)[1]
         running_sequences = self._gather_beams(topk_running_sequences, next_topk_indices)
         running_beam_scores = self._gather_beams(topk_running_log_probs, next_topk_indices)
+        running_beam_ids = self._gather_beams(topk_ids, next_topk_indices)
         running_beam_indices = self._gather_beams(topk_running_beam_indices, next_topk_indices)
-        return running_sequences, running_beam_scores, running_beam_indices
+        return running_sequences, running_beam_scores, running_beam_ids, running_beam_indices
 
     def _update_finished_beams(
         self,
@@ -3876,6 +3898,9 @@ class GenerationMixin(ContinuousMixin):
             `model.config.is_encoder_decoder=True`.
         """
 
+        # [DEBUG|@jamesnulliu]
+        print("[DEBUG] Beam Search Generation")
+
         # 1. init beam_search values
         pad_token_id = generation_config._pad_token_tensor
         eos_token_id = generation_config._eos_token_tensor
@@ -3890,6 +3915,7 @@ class GenerationMixin(ContinuousMixin):
         max_length = generation_config.max_length
         num_beams = generation_config.num_beams
         num_return_sequences = generation_config.num_return_sequences
+        soft_thinking = generation_config.soft_thinking
 
         batch_size_unflattened, cur_len = input_ids.shape[:2]
         batch_size = batch_size_unflattened // num_beams
@@ -4039,7 +4065,7 @@ class GenerationMixin(ContinuousMixin):
 
             # c. Retrieve top-K continuations, i.e. select the next token (greedy or sampling) and then keep the best
             # continuations among all beams based on the accumulated scores.
-            topk_log_probs, topk_running_sequences, topk_running_beam_indices = self._get_top_k_continuations(
+            top_k_con = self._get_top_k_continuations(
                 accumulated_log_probs=log_probs,
                 running_sequences=running_sequences,
                 running_beam_indices=running_beam_indices,
@@ -4051,6 +4077,7 @@ class GenerationMixin(ContinuousMixin):
                 vocab_size=vocab_size,
                 batch_size=batch_size,
             )
+            topk_log_probs, topk_running_sequences, topk_running_beam_indices, topk_ids = top_k_con
 
             # d. Check which running sequences have finished
             next_token_hits_stopping_criteria = stopping_criteria(
@@ -4062,13 +4089,19 @@ class GenerationMixin(ContinuousMixin):
             )
 
             # e. Get the non-finished running `num_beams` sequences for the next generation step
-            running_sequences, running_beam_scores, running_beam_indices = self._get_running_beams_for_next_iteration(
+            run_beams_next = self._get_running_beams_for_next_iteration(
                 topk_log_probs=topk_log_probs,
+                topk_ids=topk_ids,
                 topk_running_sequences=topk_running_sequences,
                 topk_running_beam_indices=topk_running_beam_indices,
                 next_token_hits_stopping_criteria=next_token_hits_stopping_criteria,
                 num_beams=num_beams,
             )
+            running_sequences, running_beam_scores, running_beam_ids, running_beam_indices = run_beams_next
+
+            if soft_thinking:
+                model_kwargs["topk_probs"] = torch.softmax(running_beam_scores, dim=-1)  # [B, K]
+                model_kwargs["topk_ids"] = running_beam_ids  # [B, K]
 
             # f. Update the completed beams if a new high score in a finished sequence is found
             sequences, beam_scores, beam_indices, is_sent_finished = self._update_finished_beams(

@@ -825,6 +825,35 @@ class OPTForCausalLM(OPTPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if (topk_ids := kwargs.pop("topk_ids", None)) is not None:
+            topk_probs = kwargs.pop("topk_probs", None)  # [B, K]
+            topk_probs = (topk_probs / topk_probs.sum(dim=-1, keepdim=True)).unsqueeze(-1)  # [B, K, 1]
+            embed_table = self.get_input_embeddings().weight # [V, D]
+            # Extend embed_table to [B, V, D] to match topk_ids shape
+            embed_table = embed_table.unsqueeze(0).expand(topk_probs.shape[0], -1, -1)
+            # Select `K` embedding vectors from the embed_table based on topk_ids; -> [B, K, D]
+            embed_table = torch.gather(embed_table, 1,
+                                         topk_ids.unsqueeze(-1).expand(-1, -1, embed_table.shape[-1]))
+            # [B, K, 1] * [B, K, D] -> [B, K, D]
+            inputs_embeds = embed_table * topk_probs
+            # -> [B, D]
+            inputs_embeds = torch.sum(inputs_embeds, dim=1).unsqueeze(1)
+            # If B != input_ids.shape[0], this means we are using beam search;
+            # Current solution is to expand B to B*K to mach inputs_embeds.
+            # [TODO|jamesnulliu] But it is better to shrink each beam into one seq!
+            if inputs_embeds.shape[0] != input_ids.shape[0]:
+                bsz = inputs_embeds.shape[0]
+                ksz = topk_probs.shape[1]
+                assert bsz * ksz == input_ids.shape[0], (
+                    f"inputs_embeds.shape[0] {bsz} * topk_log_probs.shape[1] {ksz} != input_ids.shape[0] "
+                    f"{input_ids.shape[0]}"
+                )
+                # Repeat inputs_embeds to match input_ids batch size
+                inputs_embeds = inputs_embeds.repeat_interleave(ksz, dim=0)
+            input_ids = None
+
+
+
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.decoder(
             input_ids=input_ids,
