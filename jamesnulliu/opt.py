@@ -43,28 +43,3 @@ print("------------------------")
 print(o2)
 print("------------------------")
 
-# print(logprobs.shape)
-
-# from transformers.hack.vis import *  # noqa: F403
-
-
-# setup_matplotlib_style()
-
-
-# fig1, ax1 = visualize_logprob_line(
-#     logprobs[0], title=f"Log Probability Distribution "
-# )
-# # Save
-# fig1.savefig("logprob_distribution.png", dpi=300, bbox_inches='tight')
-
-# # Histogram analysis
-# print("Generating histogram of log probability values...")
-# fig2, ax2 = plot_logprob_histogram(logprobs[0])
-# fig2.savefig("logprob_histogram.png", dpi=300, bbox_inches='tight')
-
-# # Top-k analysis
-# print("Generating bar chart of top-10 token probabilities...")
-# fig3, ax3 = plot_top_k_probs(logprobs[0], k=10)
-# fig3.savefig("top_k_probs.png", dpi=300, bbox_inches='tight')
-
-

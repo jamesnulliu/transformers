@@ -852,8 +852,6 @@ class OPTForCausalLM(OPTPreTrainedModel, GenerationMixin):
                 inputs_embeds = inputs_embeds.repeat_interleave(ksz, dim=0)
             input_ids = None
 
-
-
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.decoder(
             input_ids=input_ids,
