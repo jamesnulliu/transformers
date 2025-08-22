@@ -3,9 +3,7 @@ set -e
 
 export HF_HOME=${HF_HOME:-"/home/shared"}
 
-# [TODO|@jamesnulliu] 
-#   I would change conda to uv later :)
-conda activate transformers
+source .venv/bin/activate
 
 FILE_PATH=$(realpath "$1")
 FILE_DIR=$(dirname "$FILE_PATH")
