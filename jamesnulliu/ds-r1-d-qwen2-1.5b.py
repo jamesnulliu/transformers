@@ -1,6 +1,6 @@
 import torch
 
-from transformers import AutoTokenizer, GenerationConfig, OPTForCausalLM
+from transformers import AutoTokenizer, GenerationConfig, Qwen2ForCausalLM
 
 
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -10,7 +10,7 @@ def main():
     print(f"Loading model: {MODEL_NAME}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = OPTForCausalLM.from_pretrained(MODEL_NAME)
+    model = Qwen2ForCausalLM.from_pretrained(MODEL_NAME)
     print(type(model))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
