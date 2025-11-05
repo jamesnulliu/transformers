@@ -355,20 +355,26 @@ class Qwen3Model(Qwen3PreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: Optional[torch.LongTensor] = None,  # (B, S)
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,  # (B, T, E)
+        thinking_mask: Optional[torch.Tensor] = None,  # (B, S)
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        if input_ids is None:
+            raise ValueError("Not supported for Soft Thinking")
+        # Caclulate full input embeds
+        # Shape: (B, S, E)
+        embeds = self.embed_tokens(input_ids)
+        if thinking_mask is not None and input_ids is not None and inputs_embeds is not None:
+            # Replace the thinking pos from inputs_embeds to embeds
+            thinking_pos = thinking_mask.nonzero(as_tuple=True)
+            embeds[thinking_pos] = inputs_embeds[thinking_pos]
+        inputs_embeds = embeds
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -449,6 +455,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        thinking_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -483,6 +490,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            thinking_mask=thinking_mask,
             use_cache=use_cache,
             cache_position=cache_position,
             **kwargs,
