@@ -359,7 +359,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,  # (B, T, E)
+        inputs_embeds: Optional[torch.FloatTensor] = None,  # (B, S, E)
         thinking_mask: Optional[torch.Tensor] = None,  # (B, S)
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
