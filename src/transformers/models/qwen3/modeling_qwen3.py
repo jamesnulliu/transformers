@@ -365,6 +365,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
+        print("[DEBUG] transformers.models.qwen3.modeling_qwen3.Qwen3Model.forward called!!!")
         if input_ids is None:
             raise ValueError("Not supported for Soft Thinking")
         # Caclulate full input embeds

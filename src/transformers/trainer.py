@@ -4098,6 +4098,7 @@ class Trainer:
         Subclass and override for custom behavior. If you are not using `num_items_in_batch` when computing your loss,
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
+        print(f"[DEBUG] transformers.trainer.Trainer.compute_loss: {inputs.keys()}")
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
