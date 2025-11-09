@@ -1001,6 +1001,7 @@ class Trainer:
             self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
 
     def _remove_unused_columns(self, dataset: "datasets.Dataset", description: Optional[str] = None):
+        print("[DEBUG] transformer.trainer.Trainer._remove_unused_columns: ", self.args.remove_unused_coloumns)
         if not self.args.remove_unused_columns:
             return dataset
         self._set_signature_columns_if_needed()
@@ -1090,6 +1091,9 @@ class Trainer:
     ) -> DataLoader:
         """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
 
+        first_data_in_dataset = dataset[0]
+        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: ", first_data_in_dataset.keys())
+
         data_collator = self.data_collator
         if is_datasets_available() and isinstance(dataset, datasets.Dataset):
             dataset = self._remove_unused_columns(dataset, description=description)
@@ -1122,6 +1126,9 @@ class Trainer:
                 self._eval_dataloaders[dataloader_key] = dataloader
             else:
                 self._eval_dataloaders = {dataloader_key: dataloader}
+
+        first_batch = next(iter(dataloader))
+        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: first batch keys: ", first_batch.keys())
 
         return dataloader
 
@@ -2577,10 +2584,6 @@ class Trainer:
 
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_dataloader = train_dataloader
-            # Get first data in dataloader
-            first_data = next(iter(epoch_dataloader))
-            print("[DEBUG] transformers.trainer.Trainer._inner_training_loop: first data keys:", first_data.keys())
-
             if hasattr(epoch_dataloader, "set_epoch"):
                 epoch_dataloader.set_epoch(epoch)
 
