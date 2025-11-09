@@ -4112,7 +4112,7 @@ class Trainer:
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
         print(f"[DEBUG] transformers.trainer.Trainer.compute_loss: {inputs.keys()}")
-        if thinking_mask := inputs.pop("thinking_mask", None):
+        if (thinking_mask := inputs.pop("thinking_mask", None)) is not None:
             labels = {
                 # ↓ Shape: (B, S)
                 "input_ids": inputs["input_ids"],
