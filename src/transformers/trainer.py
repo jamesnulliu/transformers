@@ -1137,6 +1137,10 @@ class Trainer:
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
+        # Get first sample from the training dataset
+        first_sample = self.train_dataset[0]
+        print("[DEBUG] transformers.trainer.Trainer.get_train_dataloader: first sample keys:", first_sample.keys())
+
         return self._get_dataloader(
             dataset=self.train_dataset,
             description="Training",
