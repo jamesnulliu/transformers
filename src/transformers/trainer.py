@@ -4101,6 +4101,19 @@ class Trainer:
         print(f"[DEBUG] transformers.trainer.Trainer.compute_loss: {inputs.keys()}")
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
+            if thinking_mask := inputs.pop("thinking_mask", None):
+                labels = {
+                    # ↓ Shape: (B, S)
+                    "input_ids": inputs["input_ids"],
+                    # ↓ Shape: (B, S, nB)
+                    "think_tkids": inputs.pop("think_tkids"),
+                    # ↓ Shape: (B, S, nB)
+                    "think_probs": inputs.pop("think_probs"),
+                    # ↓ Shape: (B, S)
+                    "loss_mask": inputs.pop("loss_mask"),
+                    # ↓ Shape: (B, S)
+                    "thinking_mask": thinking_mask,
+                }
         else:
             labels = None
         if self.model_accepts_loss_kwargs:
