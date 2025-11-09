@@ -2620,6 +2620,7 @@ class Trainer:
                 # This is used to correctly scale the loss when the last accumulation step has fewer batches
                 self.current_gradient_accumulation_steps = len(batch_samples)
                 for i, inputs in enumerate(batch_samples):
+                    print(f"[DEBUG] transformer.trainer.Traner._inner_training_loop: input_keys: {inputs.keys()}")
                     step += 1
                     do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
                     # Since we perform prefetching, we need to manually set sync_gradients
