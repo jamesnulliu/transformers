@@ -1043,7 +1043,10 @@ class Trainer:
         self._set_signature_columns_if_needed()
         signature_columns = self._signature_columns
 
-        print("[DEBUG] transformer.trainer.Trainer._get_collator_with_removed_columns: signature_columns: ", self._signature_columns)
+        print(
+            "[DEBUG] transformer.trainer.Trainer._get_collator_with_removed_columns: signature_columns: ",
+            self._signature_columns,
+        )
         remove_columns_collator = RemoveColumnsCollator(
             data_collator=data_collator,
             signature_columns=signature_columns,
@@ -4109,21 +4112,21 @@ class Trainer:
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
         print(f"[DEBUG] transformers.trainer.Trainer.compute_loss: {inputs.keys()}")
-        if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
+        if thinking_mask := inputs.pop("thinking_mask", None):
+            labels = {
+                # ↓ Shape: (B, S)
+                "input_ids": inputs["input_ids"],
+                # ↓ Shape: (B, S, nB)
+                "think_tkids": inputs.pop("think_tkids"),
+                # ↓ Shape: (B, S, nB)
+                "think_probs": inputs.pop("think_probs"),
+                # ↓ Shape: (B, S)
+                "loss_mask": inputs.pop("loss_mask"),
+                # ↓ Shape: (B, S)
+                "thinking_mask": thinking_mask,
+            }
+        elif (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
-            if thinking_mask := inputs.pop("thinking_mask", None):
-                labels = {
-                    # ↓ Shape: (B, S)
-                    "input_ids": inputs["input_ids"],
-                    # ↓ Shape: (B, S, nB)
-                    "think_tkids": inputs.pop("think_tkids"),
-                    # ↓ Shape: (B, S, nB)
-                    "think_probs": inputs.pop("think_probs"),
-                    # ↓ Shape: (B, S)
-                    "loss_mask": inputs.pop("loss_mask"),
-                    # ↓ Shape: (B, S)
-                    "thinking_mask": thinking_mask,
-                }
         else:
             labels = None
         if self.model_accepts_loss_kwargs:
