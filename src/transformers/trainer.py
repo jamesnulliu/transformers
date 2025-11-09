@@ -1137,10 +1137,6 @@ class Trainer:
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
-        # Get first sample from the training dataset
-        first_sample = self.train_dataset[0]
-        print("[DEBUG] transformers.trainer.Trainer.get_train_dataloader: first sample keys:", first_sample.keys())
-
         return self._get_dataloader(
             dataset=self.train_dataset,
             description="Training",
@@ -2376,7 +2372,6 @@ class Trainer:
             self.state.train_batch_size = self._train_batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
         # Data loader and number of training steps
-        print("[DEBUG] Getting train dataloader...")
         train_dataloader = self.get_train_dataloader()
         if self.is_fsdp_xla_v2_enabled:
             train_dataloader = tpu_spmd_dataloader(train_dataloader)
@@ -2582,6 +2577,10 @@ class Trainer:
 
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_dataloader = train_dataloader
+            # Get first data in dataloader
+            first_data = next(iter(epoch_dataloader))
+            print("[DEBUG] transformers.trainer.Trainer._inner_training_loop: first data keys:", first_data.keys())
+
             if hasattr(epoch_dataloader, "set_epoch"):
                 epoch_dataloader.set_epoch(epoch)
 
