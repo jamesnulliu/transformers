@@ -3881,6 +3881,7 @@ class Trainer:
             tuple: (context_manager, prepared_inputs) where context_manager is either
                    the context parallelism wrapper or a no-op context
         """
+        print("[DEBUG] transformers.trainer.Trainer._prepare_context_parallel_inputs: inputs keys:", inputs.keys())
         if (
             getattr(self.accelerator, "parallelism_config", None) is not None
             and self.accelerator.parallelism_config.cp_enabled
