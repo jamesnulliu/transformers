@@ -1042,6 +1042,7 @@ class Trainer:
         self._set_signature_columns_if_needed()
         signature_columns = self._signature_columns
 
+        print("[DEBUG] transformer.trainer.Trainer._get_collator_with_removed_columns: signature_columns: ", self._signature_columns)
         remove_columns_collator = RemoveColumnsCollator(
             data_collator=data_collator,
             signature_columns=signature_columns,
@@ -1091,8 +1092,6 @@ class Trainer:
     ) -> DataLoader:
         """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
 
-        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: signature_columns: ", self._signature_columns)
-        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: dataset keys: ", dataset[0].keys())
         data_collator = self.data_collator
         if is_datasets_available() and isinstance(dataset, datasets.Dataset):
             dataset = self._remove_unused_columns(dataset, description=description)
