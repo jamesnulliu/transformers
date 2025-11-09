@@ -1091,11 +1091,14 @@ class Trainer:
     ) -> DataLoader:
         """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
 
+        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: signature_columns: ", self._signature_columns)
+        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: dataset keys: ", dataset[0].keys())
         data_collator = self.data_collator
         if is_datasets_available() and isinstance(dataset, datasets.Dataset):
             dataset = self._remove_unused_columns(dataset, description=description)
         else:
             data_collator = self._get_collator_with_removed_columns(self.data_collator, description=description)
+        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: dataset keys: ", dataset[0].keys())
 
         dataloader_params = {
             "batch_size": batch_size,
