@@ -1001,7 +1001,7 @@ class Trainer:
             self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
 
     def _remove_unused_columns(self, dataset: "datasets.Dataset", description: Optional[str] = None):
-        print("[DEBUG] transformer.trainer.Trainer._remove_unused_columns: ", self.args.remove_unused_coloumns)
+        print("[DEBUG] transformer.trainer.Trainer._remove_unused_columns: ", self.args.remove_unused_columns)
         if not self.args.remove_unused_columns:
             return dataset
         self._set_signature_columns_if_needed()
@@ -1090,9 +1090,6 @@ class Trainer:
         dataloader_key: Optional[str] = None,
     ) -> DataLoader:
         """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
-
-        first_data_in_dataset = dataset[0]
-        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: ", first_data_in_dataset.keys())
 
         data_collator = self.data_collator
         if is_datasets_available() and isinstance(dataset, datasets.Dataset):
