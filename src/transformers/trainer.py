@@ -600,7 +600,6 @@ class Trainer:
             else default_data_collator
         )
         self.data_collator = data_collator if data_collator is not None else default_collator
-        print(f"[DEBUG] Using data collator of type {self.data_collator.__class__.__name__}")
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.processing_class = processing_class
@@ -1002,7 +1001,6 @@ class Trainer:
             self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
 
     def _remove_unused_columns(self, dataset: "datasets.Dataset", description: Optional[str] = None):
-        print("[DEBUG] transformer.trainer.Trainer._remove_unused_columns: ", self.args.remove_unused_columns)
         if not self.args.remove_unused_columns:
             return dataset
         self._set_signature_columns_if_needed()
@@ -1042,11 +1040,6 @@ class Trainer:
             return data_collator
         self._set_signature_columns_if_needed()
         signature_columns = self._signature_columns
-
-        print(
-            "[DEBUG] transformer.trainer.Trainer._get_collator_with_removed_columns: signature_columns: ",
-            self._signature_columns,
-        )
         remove_columns_collator = RemoveColumnsCollator(
             data_collator=data_collator,
             signature_columns=signature_columns,
@@ -1101,7 +1094,6 @@ class Trainer:
             dataset = self._remove_unused_columns(dataset, description=description)
         else:
             data_collator = self._get_collator_with_removed_columns(self.data_collator, description=description)
-        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: dataset keys: ", dataset[0].keys())
 
         dataloader_params = {
             "batch_size": batch_size,
@@ -1131,7 +1123,6 @@ class Trainer:
                 self._eval_dataloaders = {dataloader_key: dataloader}
 
         first_batch = next(iter(dataloader))
-        print("[DEBUG] transformer.trainer.Trainer._get_dataloader: first batch keys: ", first_batch.keys())
 
         return dataloader
 
@@ -2630,7 +2621,6 @@ class Trainer:
                 # This is used to correctly scale the loss when the last accumulation step has fewer batches
                 self.current_gradient_accumulation_steps = len(batch_samples)
                 for i, inputs in enumerate(batch_samples):
-                    print(f"[DEBUG] transformer.trainer.Traner._inner_training_loop: input_keys: {inputs.keys()}")
                     step += 1
                     do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
                     # Since we perform prefetching, we need to manually set sync_gradients
@@ -3892,7 +3882,6 @@ class Trainer:
             tuple: (context_manager, prepared_inputs) where context_manager is either
                    the context parallelism wrapper or a no-op context
         """
-        print("[DEBUG] transformers.trainer.Trainer._prepare_context_parallel_inputs: inputs keys:", inputs.keys())
         if (
             getattr(self.accelerator, "parallelism_config", None) is not None
             and self.accelerator.parallelism_config.cp_enabled
@@ -4024,7 +4013,6 @@ class Trainer:
                 self.optimizer.train()
 
             inputs = self._prepare_inputs(inputs)
-            print("[DEBUG] transformers.trainer.Trainer.training_step: prepared inputs keys:", inputs.keys())
             if is_sagemaker_mp_enabled():
                 loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
                 return loss_mb.reduce_mean().detach().to(self.args.device)
@@ -4111,7 +4099,6 @@ class Trainer:
         Subclass and override for custom behavior. If you are not using `num_items_in_batch` when computing your loss,
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
-        print(f"[DEBUG] transformers.trainer.Trainer.compute_loss: {inputs.keys()}")
         if (thinking_mask := inputs.pop("thinking_mask", None)) is not None:
             labels = {
                 # ↓ Shape: (B, S)
