@@ -4102,7 +4102,7 @@ class Trainer:
         if (thinking_mask := inputs.pop("thinking_mask", None)) is not None:
             labels = {
                 # ↓ Shape: (B, S)
-                "input_ids": inputs["input_ids"],
+                "labels": inputs.pop("labels"),
                 # ↓ Shape: (B, S, nB)
                 "think_tkids": inputs.pop("think_tkids"),
                 # ↓ Shape: (B, S, nB)
