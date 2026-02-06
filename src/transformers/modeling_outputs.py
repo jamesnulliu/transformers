@@ -158,6 +158,13 @@ class BaseModelOutputWithPast(ModelOutput):
 
 
 @dataclass
+class BaseModelOutputWithPastAndLayerHiddenStates(ModelOutput):
+    layer_hidden_states: Optional[list[torch.FloatTensor]] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[tuple[torch.FloatTensor, ...]] = None
+
+@dataclass
 class BaseModelOutputWithCrossAttentions(ModelOutput):
     """
     Base class for model's outputs, with potential hidden states and attentions.
@@ -686,6 +693,15 @@ class CausalLMOutputWithPast(ModelOutput):
 
     loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[tuple[torch.FloatTensor, ...]] = None
+
+
+@dataclass
+class CausalLMOutputWithPastAndLayerLogits(ModelOutput):
+    loss: Optional[torch.FloatTensor] = None
+    layer_logits: Optional[list[torch.FloatTensor]] = None
     past_key_values: Optional[Cache] = None
     hidden_states: Optional[tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[tuple[torch.FloatTensor, ...]] = None
