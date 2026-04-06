@@ -37,6 +37,26 @@ from ...utils.generic import check_model_inputs
 from .configuration_qwen2 import Qwen2Config
 
 
+def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
+    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
+    normalized_value = raw_target_layers.strip().strip("[]")
+    if not normalized_value:
+        return list(range(num_hidden_layers))
+
+    target_layer_idxs = [
+        int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()
+    ]
+    invalid_layers = [
+        idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers
+    ]
+    if invalid_layers:
+        raise ValueError(
+            "TARGET_LAYERS contains invalid layer indices "
+            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
+        )
+    return target_layer_idxs
+
+
 class Qwen2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -412,8 +432,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        target_layer_idxs: list[int] = [int(idx) for idx in os.environ["TARGET_LAYERS"].split(",")]
-        target_hidden_states: list[torch.Tensor] = []
+        target_layer_idxs = _parse_target_layer_indices(
+            self.config.num_hidden_layers
+        )
+        target_layer_idx_set = set(target_layer_idxs)
+        target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
 
         # Any target index should not be larger than (num_hidden_layers - 1), since the hidden states are collected after the layer forward
 
@@ -428,11 +451,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 cache_position=cache_position,
                 **kwargs,
             )
-            if idx in target_layer_idxs:
-                target_hidden_states.append(hidden_states)
+            if idx in target_layer_idx_set:
+                target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        for idx in range(len(target_hidden_states)):
-            target_hidden_states[idx] = self.norm(target_hidden_states[idx])
+        target_hidden_states = [
+            target_hidden_states_by_idx[idx] for idx in target_layer_idxs
+        ]
 
         # return BaseModelOutputWithPast(
         #     last_hidden_state=hidden_states,
