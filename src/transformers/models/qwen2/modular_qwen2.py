@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from typing import Optional
 
@@ -11,10 +12,12 @@ from ...masking_utils import create_causal_mask, create_sliding_window_causal_ma
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_outputs import (
     BaseModelOutputWithPast,
+    BaseModelOutputWithPastAndLayerHiddenStates,
+    CausalLMOutputWithPastAndLayerLogits,
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
 from ...processing_utils import Unpack
-from ...utils import TransformersKwargs, auto_docstring, logging
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.generic import check_model_inputs
 from ...utils.import_utils import get_torch_version
 from ..gemma2.modeling_gemma2 import Gemma2RotaryEmbedding
@@ -160,7 +163,7 @@ class Qwen2Model(MistralModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithPastAndLayerHiddenStates:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -201,7 +204,11 @@ class Qwen2Model(MistralModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        target_layer_idxs: list[int] = [int(idx) for idx in os.environ["TARGET_LAYERS"].split(",")]
+        target_hidden_states: list[torch.Tensor] = []
+
+        # Any target index should not be larger than (num_hidden_layers - 1), since the hidden states are collected after the layer forward
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -212,16 +219,63 @@ class Qwen2Model(MistralModel):
                 cache_position=cache_position,
                 **kwargs,
             )
+            if idx in target_layer_idxs:
+                target_hidden_states.append(hidden_states)
 
-        hidden_states = self.norm(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+        for idx in range(len(target_hidden_states)):
+            target_hidden_states[idx] = self.norm(target_hidden_states[idx])
+
+        return BaseModelOutputWithPastAndLayerHiddenStates(
+            layer_hidden_states=target_hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
 
 
 class Qwen2ForCausalLM(LlamaForCausalLM):
-    pass
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: int | torch.Tensor = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPastAndLayerLogits:
+        outputs: BaseModelOutputWithPastAndLayerHiddenStates = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        layer_logits: list[torch.Tensor] = [
+            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
+        ]
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPastAndLayerLogits(
+            loss=loss,
+            layer_logits=layer_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class Qwen2ForSequenceClassification(LlamaForSequenceClassification):

@@ -415,6 +415,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
         target_layer_idxs: list[int] = [int(idx) for idx in os.environ["TARGET_LAYERS"].split(",")]
         target_hidden_states: list[torch.Tensor] = []
 
+        # Any target index should not be larger than (num_hidden_layers - 1), since the hidden states are collected after the layer forward
+
         for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,

@@ -14,17 +14,20 @@
 # limitations under the License.
 """PyTorch Qwen3 model."""
 
+import os
 from collections.abc import Callable
 from typing import Optional
 
 import torch
 
-from ...cache_utils import Cache
+from ...cache_utils import Cache, DynamicCache
+from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_outputs import CausalLMOutputWithPast
+from ...modeling_outputs import BaseModelOutputWithPastAndLayerHiddenStates, CausalLMOutputWithPastAndLayerLogits
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
 from ...processing_utils import Unpack
-from ...utils import TransformersKwargs, logging
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils.generic import check_model_inputs
 from ..gemma.modeling_gemma import GemmaMLP
 from ..llama.modeling_llama import (
     LlamaAttention,
@@ -34,6 +37,7 @@ from ..qwen2.modeling_qwen2 import (
     Qwen2ForQuestionAnswering,
     Qwen2ForSequenceClassification,
     Qwen2ForTokenClassification,
+    Qwen2Model,
     Qwen2RMSNorm,
     Qwen2RotaryEmbedding,
     apply_rotary_pos_emb,
@@ -112,11 +116,102 @@ class Qwen3Attention(LlamaAttention):
         return attn_output, attn_weights
 
 
-class Qwen3ForCausalLM(Qwen2ForCausalLM):
+class Qwen3Model(Qwen2Model):
+    def __init__(self, config: Qwen3Config):
+        super().__init__(config)
+        self.has_sliding_layers = "sliding_attention" in self.config.layer_types
+
+    @check_model_inputs()
+    @auto_docstring
     def forward(
         self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPastAndLayerHiddenStates:
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": position_ids,
+            }
+            causal_mask_mapping = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+            if self.has_sliding_layers:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+
+        hidden_states = inputs_embeds
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        target_layer_idxs: list[int] = [int(idx) for idx in os.environ["TARGET_LAYERS"].split(",")]
+        target_hidden_states: list[torch.Tensor] = []
+
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask_mapping[decoder_layer.attention_type],
+                position_embeddings=position_embeddings,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                **kwargs,
+            )
+            if idx in target_layer_idxs:
+                target_hidden_states.append(hidden_states)
+
+        for idx in range(len(target_hidden_states)):
+            target_hidden_states[idx] = self.norm(target_hidden_states[idx])
+
+        return BaseModelOutputWithPastAndLayerHiddenStates(
+            layer_hidden_states=target_hidden_states,
+            past_key_values=past_key_values if use_cache else None,
+        )
+
+
+class Qwen3ForCausalLM(Qwen2ForCausalLM):
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **super_kwargs: Unpack[TransformersKwargs],
-    ) -> CausalLMOutputWithPast:
+    ) -> CausalLMOutputWithPastAndLayerLogits:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
@@ -139,7 +234,36 @@ class Qwen3ForCausalLM(Qwen2ForCausalLM):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        return super().forward(**super_kwargs)
+        outputs: BaseModelOutputWithPastAndLayerHiddenStates = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **super_kwargs,
+        )
+
+        layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        layer_logits: list[torch.Tensor] = [
+            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
+        ]
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(
+                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **super_kwargs
+            )
+
+        return CausalLMOutputWithPastAndLayerLogits(
+            loss=loss,
+            layer_logits=layer_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class Qwen3ForSequenceClassification(Qwen2ForSequenceClassification):
