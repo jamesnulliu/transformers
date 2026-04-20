@@ -9,7 +9,9 @@ The modifications in the last 4 commits use one environment variable:
 ### 1.1.1. `TARGET_LAYERS`
 
 - Purpose: selects which decoder layers should be projected through `lm_head` and returned in `outputs.layer_logits`.
-- Used in:
+- Checked automatically in:
+  - `src/transformers/__init__.py`
+- Consumed in:
   - `src/transformers/models/qwen2/modular_qwen2.py`
   - `src/transformers/models/qwen2/modeling_qwen2.py`
   - `src/transformers/models/qwen3/modular_qwen3.py`
@@ -18,8 +20,11 @@ The modifications in the last 4 commits use one environment variable:
   - `"0,1,2"`
   - `"[0,1,2]"`
   - whitespace is tolerated around values
-- Default behavior:
-  - if `TARGET_LAYERS` is unset or empty, all decoder layers are selected: `list(range(config.num_hidden_layers))`
+- Required behavior:
+  - if `TARGET_LAYERS` is unset, the code raises `ValueError`
+  - if `TARGET_LAYERS` is set but empty, the code raises `ValueError`
+  - the check happens automatically during `import transformers`
+  - the error tells the user to set `TARGET_LAYERS` or avoid using this branch
 - Validation:
   - if any index is `< 0` or `>= config.num_hidden_layers`, the code raises `ValueError`
 
@@ -33,15 +38,11 @@ export TARGET_LAYERS=0,1,2
 export TARGET_LAYERS='[4,8,16,24]'
 ```
 
-```bash
-unset TARGET_LAYERS
-# equivalent to: use all layers
-```
-
 ## 1.2. Output Behavior
 
 After these changes:
 
+- `TARGET_LAYERS` is enforced at package import time before model code is used.
 - `Qwen2Model` and `Qwen3Model` collect normalized hidden states from the selected layers only.
 - `Qwen2ForCausalLM` and `Qwen3ForCausalLM` apply `lm_head` to each selected layer hidden state.
 - The forward output becomes `CausalLMOutputWithPastAndLayerLogits`.
@@ -60,11 +61,7 @@ After these changes:
 
 ### 1.3.2. `src/transformers/models/qwen2/modular_qwen2.py`
 
-- Added `import os`
-- Added `_parse_target_layer_indices(num_hidden_layers)`
-  - reads `TARGET_LAYERS`
-  - supports empty/unset => all layers
-  - validates indices
+- No new branch-only assertion logic is added here.
 - Changed `Qwen2Model.forward()` return type from `BaseModelOutputWithPast` to `BaseModelOutputWithPastAndLayerHiddenStates`
 - Changed decoder loop to:
   - enumerate layers
@@ -84,8 +81,7 @@ After these changes:
 
 ### 1.3.4. `src/transformers/models/qwen3/modular_qwen3.py`
 
-- Added `import os`
-- Added `_parse_target_layer_indices(num_hidden_layers)`
+- No new branch-only assertion logic is added here.
 - Added a custom `Qwen3Model` implementation for this feature path
   - builds/uses cache and causal masks
   - iterates decoder layers
@@ -102,6 +98,14 @@ After these changes:
 - Generated sync of the `modular_qwen3.py` changes
 - Contains the same functional changes as above in the generated modeling file
 - Not a source-of-truth file; it is derived from the modular file
+
+### 1.3.6. `src/transformers/__init__.py`
+
+- Added an automatic import-time guard for `TARGET_LAYERS`
+  - raises `ValueError` if `TARGET_LAYERS` is unset
+  - raises `ValueError` if `TARGET_LAYERS` is empty/whitespace
+  - tells the user to set `TARGET_LAYERS` or avoid using this branch
+- This makes the branch fail fast without adding new manual validation calls in model definition files
 
 ## 1.4. Notes
 

@@ -20,6 +20,7 @@
 
 __version__ = "5.0.0.dev0"
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,12 @@ from .utils.import_utils import define_import_structure
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+if not os.environ.get("TARGET_LAYERS", "").strip():
+    raise ValueError(
+        "TARGET_LAYERS must be set when using this branch. "
+        "Set TARGET_LAYERS to the decoder layer indices to return, or avoid using this branch."
+    )
 
 # Base objects, independent of any specific backend
 _import_structure = {
