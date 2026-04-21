@@ -187,10 +187,12 @@ class BaseModelOutputWithPastAndLayerHiddenStates(ModelOutput):
             Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
             heads.
     """
+
     layer_hidden_states: Optional[list[torch.FloatTensor]] = None
     past_key_values: Optional[Cache] = None
     hidden_states: Optional[tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[tuple[torch.FloatTensor, ...]] = None
+
 
 @dataclass
 class BaseModelOutputWithCrossAttentions(ModelOutput):
@@ -734,8 +736,12 @@ class CausalLMOutputWithPastAndLayerLogits(ModelOutput):
     Args:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
             Language modeling loss (for next-token prediction).
+        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the final selected layer language modeling head (scores for each vocabulary token
+            before SoftMax).
         layer_logits (`list[torch.FloatTensor]` of shape `(n_layers, (batch_size, sequence_length, config.vocab_size))`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+            Per-layer outputs ordered by `TARGET_LAYERS`. These are language modeling head scores by default, or
+            hidden states before `lm_head` when `USE_HIDDEN_STATES=1`.
         past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
             It is a [`~cache_utils.Cache`] instance. For more details, see our [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache).
 
@@ -753,7 +759,9 @@ class CausalLMOutputWithPastAndLayerLogits(ModelOutput):
             Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
             heads.
     """
+
     loss: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
     layer_logits: Optional[list[torch.FloatTensor]] = None
     past_key_values: Optional[Cache] = None
     hidden_states: Optional[tuple[torch.FloatTensor, ...]] = None

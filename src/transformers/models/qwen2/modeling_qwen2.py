@@ -464,6 +464,18 @@ def _should_offload_layer_logits_to_cpu() -> bool:
     )
 
 
+def _should_use_hidden_states() -> bool:
+    raw_use_hidden_states = os.environ.get("USE_HIDDEN_STATES", "")
+    normalized_value = raw_use_hidden_states.strip().lower()
+    if not normalized_value:
+        return False
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("USE_HIDDEN_STATES must be one of {'1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'}.")
+
+
 @auto_docstring
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
@@ -525,21 +537,24 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        layer_logits: list[torch.Tensor] = [
-            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
-        ]
+        layer_hidden_states = [hidden_states[:, slice_indices, :] for hidden_states in layer_hidden_states]
+        logits = self.lm_head(layer_hidden_states[-1])
+        if _should_use_hidden_states():
+            layer_logits = layer_hidden_states
+        else:
+            layer_logits = [self.lm_head(hidden_states) for hidden_states in layer_hidden_states]
+            logits = layer_logits[-1]
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(
-                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
-            )
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
         if _should_offload_layer_logits_to_cpu():
             layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
 
         return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,
+            logits=logits,
             layer_logits=layer_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

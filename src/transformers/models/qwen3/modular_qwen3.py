@@ -41,6 +41,7 @@ from ..qwen2.modeling_qwen2 import (
     Qwen2RMSNorm,
     Qwen2RotaryEmbedding,
     _should_offload_layer_logits_to_cpu,
+    _should_use_hidden_states,
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
@@ -264,21 +265,24 @@ class Qwen3ForCausalLM(Qwen2ForCausalLM):
 
         layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        layer_logits: list[torch.Tensor] = [
-            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
-        ]
+        layer_hidden_states = [hidden_states[:, slice_indices, :] for hidden_states in layer_hidden_states]
+        logits = self.lm_head(layer_hidden_states[-1])
+        if _should_use_hidden_states():
+            layer_logits = layer_hidden_states
+        else:
+            layer_logits = [self.lm_head(hidden_states) for hidden_states in layer_hidden_states]
+            logits = layer_logits[-1]
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(
-                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
-            )
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
         if _should_offload_layer_logits_to_cpu():
             layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
 
         return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,
+            logits=logits,
             layer_logits=layer_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

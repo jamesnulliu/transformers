@@ -103,6 +103,40 @@ class Qwen3IntegrationTest(unittest.TestCase):
         self.assertTrue(all(layer_logit.device.type == "cpu" for layer_logit in outputs.layer_logits))
         self.assertTrue(all(not layer_logit.requires_grad for layer_logit in outputs.layer_logits))
 
+    def test_use_hidden_states_returns_hidden_states(self):
+        config = Qwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=4,
+        )
+        model = Qwen3ForCausalLM(config)
+        model.eval()
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        labels = input_ids.clone()
+
+        with patch.dict(os.environ, {"TARGET_LAYERS": "0,1", "USE_HIDDEN_STATES": "1"}, clear=False):
+            expected_hidden_states = model.model(input_ids=input_ids).layer_hidden_states
+            outputs = model(input_ids=input_ids, labels=labels)
+
+        self.assertIsNotNone(outputs.loss)
+        self.assertTrue(outputs.loss.requires_grad)
+        self.assertEqual(outputs.logits.shape[-1], config.vocab_size)
+        self.assertEqual(len(outputs.layer_logits), 2)
+        self.assertTrue(
+            all(layer_hidden_state.shape[-1] == config.hidden_size for layer_hidden_state in outputs.layer_logits)
+        )
+        self.assertTrue(
+            all(layer_hidden_state.shape[-1] != config.vocab_size for layer_hidden_state in outputs.layer_logits)
+        )
+        torch.testing.assert_close(outputs.logits, model.lm_head(expected_hidden_states[-1]))
+
+        for layer_hidden_state, expected_hidden_state in zip(outputs.layer_logits, expected_hidden_states):
+            torch.testing.assert_close(layer_hidden_state, expected_hidden_state)
+
     @slow
     def test_model_600m_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
