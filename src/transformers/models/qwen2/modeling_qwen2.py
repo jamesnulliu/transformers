@@ -23,38 +23,13 @@ from ...modeling_layers import (
     GenericForTokenClassification,
     GradientCheckpointingLayer,
 )
-from ...modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-    BaseModelOutputWithPastAndLayerHiddenStates,
-    CausalLMOutputWithPastAndLayerLogits,
-)
+from ...modeling_outputs import BaseModelOutputWithPastAndLayerHiddenStates, CausalLMOutputWithPastAndLayerLogits
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.generic import check_model_inputs
 from .configuration_qwen2 import Qwen2Config
-
-
-def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
-    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
-    normalized_value = raw_target_layers.strip().strip("[]")
-    if not normalized_value:
-        return list(range(num_hidden_layers))
-
-    target_layer_idxs = [
-        int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()
-    ]
-    invalid_layers = [
-        idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers
-    ]
-    if invalid_layers:
-        raise ValueError(
-            "TARGET_LAYERS contains invalid layer indices "
-            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
-        )
-    return target_layer_idxs
 
 
 class Qwen2MLP(nn.Module):
@@ -360,6 +335,22 @@ class Qwen2PreTrainedModel(PreTrainedModel):
     }
 
 
+def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
+    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
+    normalized_value = raw_target_layers.strip().strip("[]")
+    if not normalized_value:
+        return list(range(num_hidden_layers))
+
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
+    if invalid_layers:
+        raise ValueError(
+            "TARGET_LAYERS contains invalid layer indices "
+            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
+        )
+    return target_layer_idxs
+
+
 @auto_docstring
 class Qwen2Model(Qwen2PreTrainedModel):
     def __init__(self, config: Qwen2Config):
@@ -432,14 +423,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        target_layer_idxs = _parse_target_layer_indices(
-            self.config.num_hidden_layers
-        )
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
         target_layer_idx_set = set(target_layer_idxs)
         target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
 
         # Any target index should not be larger than (num_hidden_layers - 1), since the hidden states are collected after the layer forward
-
         for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,
@@ -454,19 +442,26 @@ class Qwen2Model(Qwen2PreTrainedModel):
             if idx in target_layer_idx_set:
                 target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        target_hidden_states = [
-            target_hidden_states_by_idx[idx] for idx in target_layer_idxs
-        ]
-
-        # return BaseModelOutputWithPast(
-        #     last_hidden_state=hidden_states,
-        #     past_key_values=past_key_values if use_cache else None,
-        # )
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
 
         return BaseModelOutputWithPastAndLayerHiddenStates(
             layer_hidden_states=target_hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
+
+
+def _should_offload_layer_logits_to_cpu() -> bool:
+    raw_offload_layer_logits = os.environ.get("OFFLOAD_LAYER_LOGITS_TO_CPU", "")
+    normalized_value = raw_offload_layer_logits.strip().lower()
+    if not normalized_value:
+        return False
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "OFFLOAD_LAYER_LOGITS_TO_CPU must be one of {'1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'}."
+    )
 
 
 @auto_docstring
@@ -498,7 +493,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> CausalLMOutputWithPast:
+    ) -> CausalLMOutputWithPastAndLayerLogits:
         r"""
         Example:
 
@@ -530,11 +525,18 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        layer_logits: list[torch.Tensor] = [self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states]
+        layer_logits: list[torch.Tensor] = [
+            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
+        ]
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(
+                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
+            )
+
+        if _should_offload_layer_logits_to_cpu():
+            layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
 
         return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,

@@ -18,6 +18,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from collections.abc import Callable
 from typing import Optional, Union
 
@@ -32,7 +33,11 @@ from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_layers import GradientCheckpointingLayer
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from ...modeling_outputs import (
+    BaseModelOutputWithPastAndLayerHiddenStates,
+    CausalLMOutputWithPast,
+    CausalLMOutputWithPastAndLayerLogits,
+)
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
@@ -466,6 +471,22 @@ class Dots1PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
 
 
+def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
+    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
+    normalized_value = raw_target_layers.strip().strip("[]")
+    if not normalized_value:
+        return list(range(num_hidden_layers))
+
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
+    if invalid_layers:
+        raise ValueError(
+            "TARGET_LAYERS contains invalid layer indices "
+            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
+        )
+    return target_layer_idxs
+
+
 @auto_docstring
 class Dots1Model(Dots1PreTrainedModel):
     def __init__(self, config: Dots1Config):
@@ -497,7 +518,7 @@ class Dots1Model(Dots1PreTrainedModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithPastAndLayerHiddenStates:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -516,9 +537,7 @@ class Dots1Model(Dots1PreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
                 "input_embeds": inputs_embeds,
@@ -527,18 +546,20 @@ class Dots1Model(Dots1PreTrainedModel):
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
-            # Create the masks
             causal_mask_mapping = {
                 "full_attention": create_causal_mask(**mask_kwargs),
             }
-            # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
                 causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
+        target_layer_idx_set = set(target_layer_idxs)
+        target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
+
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -549,12 +570,29 @@ class Dots1Model(Dots1PreTrainedModel):
                 cache_position=cache_position,
                 **kwargs,
             )
+            if idx in target_layer_idx_set:
+                target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        hidden_states = self.norm(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
+
+        return BaseModelOutputWithPastAndLayerHiddenStates(
+            layer_hidden_states=target_hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
+
+
+def _should_offload_layer_logits_to_cpu() -> bool:
+    raw_offload_layer_logits = os.environ.get("OFFLOAD_LAYER_LOGITS_TO_CPU", "")
+    normalized_value = raw_offload_layer_logits.strip().lower()
+    if not normalized_value:
+        return False
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "OFFLOAD_LAYER_LOGITS_TO_CPU must be one of {'1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'}."
+    )
 
 
 @auto_docstring
@@ -609,7 +647,7 @@ class Dots1ForCausalLM(Dots1PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        outputs: BaseModelOutputWithPast = self.model(
+        outputs: BaseModelOutputWithPastAndLayerHiddenStates = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -620,18 +658,24 @@ class Dots1ForCausalLM(Dots1PreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        hidden_states = outputs.last_hidden_state
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        layer_logits: list[torch.Tensor] = [
+            self.lm_head(hidden_states[:, slice_indices, :]) for hidden_states in layer_hidden_states
+        ]
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(
+                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
+            )
 
-        return CausalLMOutputWithPast(
+        if _should_offload_layer_logits_to_cpu():
+            layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
+
+        return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,
-            logits=logits,
+            layer_logits=layer_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,

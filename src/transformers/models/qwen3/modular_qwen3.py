@@ -16,7 +16,7 @@
 
 import os
 from collections.abc import Callable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -40,6 +40,7 @@ from ..qwen2.modeling_qwen2 import (
     Qwen2Model,
     Qwen2RMSNorm,
     Qwen2RotaryEmbedding,
+    _should_offload_layer_logits_to_cpu,
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
@@ -57,12 +58,8 @@ def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
     if not normalized_value:
         return list(range(num_hidden_layers))
 
-    target_layer_idxs = [
-        int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()
-    ]
-    invalid_layers = [
-        idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers
-    ]
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
     if invalid_layers:
         raise ValueError(
             "TARGET_LAYERS contains invalid layer indices "
@@ -190,9 +187,7 @@ class Qwen3Model(Qwen2Model):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        target_layer_idxs = _parse_target_layer_indices(
-            self.config.num_hidden_layers
-        )
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
         target_layer_idx_set = set(target_layer_idxs)
         target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
 
@@ -210,9 +205,7 @@ class Qwen3Model(Qwen2Model):
             if idx in target_layer_idx_set:
                 target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        target_hidden_states = [
-            target_hidden_states_by_idx[idx] for idx in target_layer_idxs
-        ]
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
 
         return BaseModelOutputWithPastAndLayerHiddenStates(
             layer_hidden_states=target_hidden_states,
@@ -233,8 +226,8 @@ class Qwen3ForCausalLM(Qwen2ForCausalLM):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: int | torch.Tensor = 0,
-        **super_kwargs: Unpack[TransformersKwargs],
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPastAndLayerLogits:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -266,7 +259,7 @@ class Qwen3ForCausalLM(Qwen2ForCausalLM):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
-            **super_kwargs,
+            **kwargs,
         )
 
         layer_hidden_states: list[torch.Tensor] = outputs.layer_hidden_states
@@ -278,8 +271,11 @@ class Qwen3ForCausalLM(Qwen2ForCausalLM):
         loss = None
         if labels is not None:
             loss = self.loss_function(
-                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **super_kwargs
+                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
             )
+
+        if _should_offload_layer_logits_to_cpu():
+            layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
 
         return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,

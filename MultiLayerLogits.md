@@ -1,10 +1,10 @@
 # 1. Multi-Layer Logits
 
-This branch adds multi-layer logits support for the Qwen2 and Qwen3 causal language model forward paths.
+This branch adds multi-layer logits support for the Qwen2 and Qwen3 causal language model forward paths, with an optional CPU offload path for returned per-layer logits.
 
 ## 1.1. Environment Parameters
 
-The modifications in the last 4 commits use one environment variable:
+The current modifications use two environment variables:
 
 ### 1.1.1. `TARGET_LAYERS`
 
@@ -28,6 +28,29 @@ The modifications in the last 4 commits use one environment variable:
 - Validation:
   - if any index is `< 0` or `>= config.num_hidden_layers`, the code raises `ValueError`
 
+### 1.1.2. `OFFLOAD_LAYER_LOGITS_TO_CPU`
+
+- Purpose: controls whether returned `output.layer_logits` are detached and copied to CPU RAM before the forward output is returned.
+- Consumed in:
+  - `src/transformers/models/qwen2/modular_qwen2.py`
+  - `src/transformers/models/qwen2/modeling_qwen2.py`
+  - `src/transformers/models/qwen3/modular_qwen3.py`
+  - `src/transformers/models/qwen3/modeling_qwen3.py`
+- Accepted truthy values:
+  - `"1"`
+  - `"true"`
+  - `"yes"`
+  - `"on"`
+- Accepted falsy values:
+  - `"0"`
+  - `"false"`
+  - `"no"`
+  - `"off"`
+- Required behavior:
+  - if unset or empty, the feature is disabled
+  - if enabled, the code computes loss first and then returns `layer_logits` as detached CPU tensors
+  - if set to any other value, the code raises `ValueError`
+
 Examples:
 
 ```bash
@@ -48,6 +71,7 @@ After these changes:
 - The forward output becomes `CausalLMOutputWithPastAndLayerLogits`.
 - Per-layer logits are returned in `output.layer_logits`, as a list ordered by `TARGET_LAYERS`.
 - When `labels` are provided, loss is computed from `layer_logits[-1]`, meaning the last selected layer drives training loss.
+- If `OFFLOAD_LAYER_LOGITS_TO_CPU` is enabled, returned `output.layer_logits` are detached and copied to CPU after loss computation.
 
 ## 1.3. Files Changed
 
@@ -72,6 +96,8 @@ After these changes:
   - computes logits for each collected layer hidden state
   - returns `CausalLMOutputWithPastAndLayerLogits`
   - computes loss from the last selected layer logits
+- Added optional `OFFLOAD_LAYER_LOGITS_TO_CPU` parsing
+  - when enabled, `layer_logits` are detached and copied to CPU before return
 
 ### 1.3.3. `src/transformers/models/qwen2/modeling_qwen2.py`
 
@@ -92,6 +118,8 @@ After these changes:
   - returns `CausalLMOutputWithPastAndLayerLogits`
   - computes loss from the last selected layer logits
 - Later fixes in the last 4 commits also synced Qwen3 behavior with Qwen2 and added target-layer index validation
+- Added optional `OFFLOAD_LAYER_LOGITS_TO_CPU` handling via the shared Qwen2 helper
+  - when enabled, `layer_logits` are detached and copied to CPU before return
 
 ### 1.3.5. `src/transformers/models/qwen3/modeling_qwen3.py`
 
@@ -107,8 +135,22 @@ After these changes:
   - tells the user to set `TARGET_LAYERS` or avoid using this branch
 - This makes the branch fail fast without adding new manual validation calls in model definition files
 
+### 1.3.7. `tests/models/qwen2/test_modeling_qwen2.py`
+
+- Added a focused unit test for `OFFLOAD_LAYER_LOGITS_TO_CPU`
+  - verifies `layer_logits` are returned on CPU
+  - verifies they are detached
+  - verifies training loss is still produced
+
+### 1.3.8. `tests/models/qwen3/test_modeling_qwen3.py`
+
+- Added a focused unit test for `OFFLOAD_LAYER_LOGITS_TO_CPU`
+  - verifies `layer_logits` are returned on CPU
+  - verifies they are detached
+  - verifies training loss is still produced
+
 ## 1.4. Notes
 
-- The last 4 commits only changed the 5 files listed above.
-- There were no test or docs file changes in those commits.
-- For future edits, `modular_qwen2.py` and `modular_qwen3.py` are the source-of-truth files; the generated `modeling_*.py` files should be refreshed from them.
+- `modular_qwen2.py` and `modular_qwen3.py` remain the source-of-truth files.
+- The generated `modeling_qwen2.py` and `modeling_qwen3.py` files should be refreshed from the modular sources after edits.
+- The CPU offload path is intended for logging/inspection of returned `layer_logits`, not as the default training path.

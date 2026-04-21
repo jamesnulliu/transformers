@@ -1,6 +1,6 @@
 import os
 from collections.abc import Callable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from packaging import version
@@ -11,7 +11,6 @@ from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_outputs import (
-    BaseModelOutputWithPast,
     BaseModelOutputWithPastAndLayerHiddenStates,
     CausalLMOutputWithPastAndLayerLogits,
 )
@@ -46,18 +45,28 @@ def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
     if not normalized_value:
         return list(range(num_hidden_layers))
 
-    target_layer_idxs = [
-        int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()
-    ]
-    invalid_layers = [
-        idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers
-    ]
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
     if invalid_layers:
         raise ValueError(
             "TARGET_LAYERS contains invalid layer indices "
             f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
         )
     return target_layer_idxs
+
+
+def _should_offload_layer_logits_to_cpu() -> bool:
+    raw_offload_layer_logits = os.environ.get("OFFLOAD_LAYER_LOGITS_TO_CPU", "")
+    normalized_value = raw_offload_layer_logits.strip().lower()
+    if not normalized_value:
+        return False
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "OFFLOAD_LAYER_LOGITS_TO_CPU must be one of {'1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'}."
+    )
 
 
 class Qwen2MLP(LlamaMLP):
@@ -224,9 +233,7 @@ class Qwen2Model(MistralModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        target_layer_idxs = _parse_target_layer_indices(
-            self.config.num_hidden_layers
-        )
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
         target_layer_idx_set = set(target_layer_idxs)
         target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
 
@@ -245,9 +252,7 @@ class Qwen2Model(MistralModel):
             if idx in target_layer_idx_set:
                 target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        target_hidden_states = [
-            target_hidden_states_by_idx[idx] for idx in target_layer_idxs
-        ]
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
 
         return BaseModelOutputWithPastAndLayerHiddenStates(
             layer_hidden_states=target_hidden_states,
@@ -268,7 +273,7 @@ class Qwen2ForCausalLM(LlamaForCausalLM):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: int | torch.Tensor = 0,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPastAndLayerLogits:
         outputs: BaseModelOutputWithPastAndLayerHiddenStates = self.model(
@@ -291,7 +296,12 @@ class Qwen2ForCausalLM(LlamaForCausalLM):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(
+                logits=layer_logits[-1], labels=labels, vocab_size=self.config.vocab_size, **kwargs
+            )
+
+        if _should_offload_layer_logits_to_cpu():
+            layer_logits = [layer_logit.detach().to("cpu", copy=True) for layer_logit in layer_logits]
 
         return CausalLMOutputWithPastAndLayerLogits(
             loss=loss,

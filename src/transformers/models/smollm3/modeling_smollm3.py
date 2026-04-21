@@ -19,6 +19,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections.abc import Callable
 from typing import Optional, Union
 
@@ -37,7 +38,11 @@ from ...modeling_layers import (
     GenericForTokenClassification,
     GradientCheckpointingLayer,
 )
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from ...modeling_outputs import (
+    BaseModelOutputWithPast,
+    BaseModelOutputWithPastAndLayerHiddenStates,
+    CausalLMOutputWithPast,
+)
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
@@ -363,6 +368,22 @@ class SmolLM3PreTrainedModel(PreTrainedModel):
     }
 
 
+def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
+    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
+    normalized_value = raw_target_layers.strip().strip("[]")
+    if not normalized_value:
+        return list(range(num_hidden_layers))
+
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
+    if invalid_layers:
+        raise ValueError(
+            "TARGET_LAYERS contains invalid layer indices "
+            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
+        )
+    return target_layer_idxs
+
+
 @auto_docstring
 class SmolLM3Model(SmolLM3PreTrainedModel):
     def __init__(self, config: SmolLM3Config):
@@ -394,7 +415,7 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithPastAndLayerHiddenStates:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -435,7 +456,12 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
+        target_layer_idx_set = set(target_layer_idxs)
+        target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
+
+        # Any target index should not be larger than (num_hidden_layers - 1), since the hidden states are collected after the layer forward
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -446,10 +472,13 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
                 cache_position=cache_position,
                 **kwargs,
             )
+            if idx in target_layer_idx_set:
+                target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        hidden_states = self.norm(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
+
+        return BaseModelOutputWithPastAndLayerHiddenStates(
+            layer_hidden_states=target_hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
 

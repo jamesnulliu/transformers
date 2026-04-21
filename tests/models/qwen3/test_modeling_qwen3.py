@@ -13,7 +13,9 @@
 # limitations under the License.
 """Testing suite for the PyTorch Qwen3 model."""
 
+import os
 import unittest
+from unittest.mock import patch
 
 import pytest
 from packaging import version
@@ -35,6 +37,7 @@ if is_torch_available():
     import torch
 
     from transformers import (
+        Qwen3Config,
         Qwen3ForCausalLM,
         Qwen3Model,
     )
@@ -72,6 +75,33 @@ class Qwen3IntegrationTest(unittest.TestCase):
 
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
+
+    def test_offload_layer_logits_to_cpu(self):
+        config = Qwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=4,
+        )
+        model = Qwen3ForCausalLM(config)
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        labels = input_ids.clone()
+
+        with patch.dict(
+            os.environ,
+            {"TARGET_LAYERS": "0,1", "OFFLOAD_LAYER_LOGITS_TO_CPU": "true"},
+            clear=False,
+        ):
+            outputs = model(input_ids=input_ids, labels=labels)
+
+        self.assertIsNotNone(outputs.loss)
+        self.assertTrue(outputs.loss.requires_grad)
+        self.assertEqual(len(outputs.layer_logits), 2)
+        self.assertTrue(all(layer_logit.device.type == "cpu" for layer_logit in outputs.layer_logits))
+        self.assertTrue(all(not layer_logit.requires_grad for layer_logit in outputs.layer_logits))
 
     @slow
     def test_model_600m_logits(self):

@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -41,7 +42,9 @@ from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPast,
+    BaseModelOutputWithPastAndLayerHiddenStates,
     CausalLMOutputWithPast,
+    CausalLMOutputWithPastAndLayerLogits,
     MoeCausalLMOutputWithPast,
     MoeModelOutputWithPast,
 )
@@ -2625,7 +2628,7 @@ class Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration(Qwen3OmniMoeP
         cache_position=None,
         generation_steps=None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> CausalLMOutputWithPastAndLayerLogits:
         r"""
         generation_steps (`int`):
             generation step of code predictor, 0..num_code_groups-1
@@ -3553,6 +3556,22 @@ class Qwen3OmniMoeCode2WavTransformerLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
+def _parse_target_layer_indices(num_hidden_layers: int) -> list[int]:
+    raw_target_layers = os.environ.get("TARGET_LAYERS", "")
+    normalized_value = raw_target_layers.strip().strip("[]")
+    if not normalized_value:
+        return list(range(num_hidden_layers))
+
+    target_layer_idxs = [int(idx.strip()) for idx in normalized_value.split(",") if idx.strip()]
+    invalid_layers = [idx for idx in target_layer_idxs if idx < 0 or idx >= num_hidden_layers]
+    if invalid_layers:
+        raise ValueError(
+            "TARGET_LAYERS contains invalid layer indices "
+            f"{invalid_layers}; available range is [0, {num_hidden_layers - 1}]"
+        )
+    return target_layer_idxs
+
+
 @auto_docstring
 class Qwen3OmniMoeCode2WavTransformerModel(Qwen3OmniMoePreTrainedModel):
     _can_record_outputs = {
@@ -3586,7 +3605,7 @@ class Qwen3OmniMoeCode2WavTransformerModel(Qwen3OmniMoePreTrainedModel):
         use_cache=None,
         cache_position=None,
         **kwargs,
-    ) -> BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithPastAndLayerHiddenStates:
         if input_ids is not None:
             raise ValueError("input_ids is not expected")
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -3607,9 +3626,7 @@ class Qwen3OmniMoeCode2WavTransformerModel(Qwen3OmniMoePreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
                 "input_embeds": inputs_embeds,
@@ -3618,18 +3635,20 @@ class Qwen3OmniMoeCode2WavTransformerModel(Qwen3OmniMoePreTrainedModel):
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
-            # Create the masks
             causal_mask_mapping = {
                 "full_attention": create_causal_mask(**mask_kwargs),
             }
-            # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
                 causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        target_layer_idxs = _parse_target_layer_indices(self.config.num_hidden_layers)
+        target_layer_idx_set = set(target_layer_idxs)
+        target_hidden_states_by_idx: dict[int, torch.Tensor] = {}
+
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -3640,10 +3659,13 @@ class Qwen3OmniMoeCode2WavTransformerModel(Qwen3OmniMoePreTrainedModel):
                 cache_position=cache_position,
                 **kwargs,
             )
+            if idx in target_layer_idx_set:
+                target_hidden_states_by_idx[idx] = self.norm(hidden_states)
 
-        hidden_states = self.norm(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+        target_hidden_states = [target_hidden_states_by_idx[idx] for idx in target_layer_idxs]
+
+        return BaseModelOutputWithPastAndLayerHiddenStates(
+            layer_hidden_states=target_hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
 
