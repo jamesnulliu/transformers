@@ -152,15 +152,29 @@ class Qwen2Model(MistralModel):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        thinking_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
+        if input_ids is not None and inputs_embeds is not None and thinking_mask is None:
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds "
+                "unless thinking_mask is provided"
+            )
+        if input_ids is not None:
+            embeds = self.embed_tokens(input_ids)
+            if thinking_mask is not None and inputs_embeds is not None:
+                if thinking_mask.shape != input_ids.shape:
+                    raise ValueError("thinking_mask must have the same shape as input_ids")
+                thinking_mask = thinking_mask.to(device=embeds.device, dtype=torch.bool)
+                replacement_embeds = inputs_embeds.to(device=embeds.device, dtype=embeds.dtype)
+                thinking_pos = thinking_mask.nonzero(as_tuple=True)
+                embeds = embeds.clone()
+                embeds[thinking_pos] = replacement_embeds[thinking_pos]
+            inputs_embeds = embeds
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
