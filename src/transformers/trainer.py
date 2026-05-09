@@ -1122,8 +1122,6 @@ class Trainer:
             else:
                 self._eval_dataloaders = {dataloader_key: dataloader}
 
-        first_batch = next(iter(dataloader))
-
         return dataloader
 
     def get_train_dataloader(self) -> DataLoader:
@@ -4099,19 +4097,28 @@ class Trainer:
         Subclass and override for custom behavior. If you are not using `num_items_in_batch` when computing your loss,
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
-        if (thinking_mask := inputs.pop("thinking_mask", None)) is not None:
-            labels = {
-                # ↓ Shape: (B, S)
-                "labels": inputs.pop("labels"),
-                # ↓ Shape: (B, S, nB)
-                "think_tkids": inputs.pop("think_tkids"),
-                # ↓ Shape: (B, S, nB)
-                "think_probs": inputs.pop("think_probs"),
-                # ↓ Shape: (B, S)
-                "loss_mask": inputs.pop("loss_mask"),
-                # ↓ Shape: (B, S)
-                "thinking_mask": thinking_mask,
-            }
+        if (thinking_mask := inputs.get("thinking_mask")) is not None:
+            if self.compute_loss_func is not None:
+                labels = {
+                    # ↓ Shape: (B, S)
+                    "labels": inputs.pop("labels"),
+                    # ↓ Shape: (B, S, nB)
+                    "think_tkids": inputs.pop("think_tkids"),
+                    # ↓ Shape: (B, S, nB)
+                    "think_probs": inputs.pop("think_probs"),
+                    # ↓ Shape: (B, S)
+                    "loss_mask": inputs.pop("loss_mask"),
+                    # ↓ Shape: (B, S)
+                    "thinking_mask": thinking_mask,
+                }
+            else:
+                inputs.pop("think_tkids", None)
+                inputs.pop("think_probs", None)
+                inputs.pop("loss_mask", None)
+                if self.label_smoother is not None and "labels" in inputs:
+                    labels = inputs.pop("labels")
+                else:
+                    labels = None
         elif (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
         else:

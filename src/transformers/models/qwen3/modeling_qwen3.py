@@ -365,16 +365,24 @@ class Qwen3Model(Qwen3PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        if input_ids is None:
-            raise ValueError("Not supported for Soft Thinking")
-        # Caclulate full input embeds
-        # Shape: (B, S, E)
-        embeds = self.embed_tokens(input_ids)
-        if thinking_mask is not None and input_ids is not None and inputs_embeds is not None:
-            # Replace the thinking pos from inputs_embeds to embeds
-            thinking_pos = thinking_mask.nonzero(as_tuple=True)
-            embeds[thinking_pos] = inputs_embeds[thinking_pos]
-        inputs_embeds = embeds
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
+        if input_ids is not None and inputs_embeds is not None and thinking_mask is None:
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds "
+                "unless thinking_mask is provided"
+            )
+        if input_ids is not None:
+            embeds = self.embed_tokens(input_ids)
+            if thinking_mask is not None and inputs_embeds is not None:
+                if thinking_mask.shape != input_ids.shape:
+                    raise ValueError("thinking_mask must have the same shape as input_ids")
+                thinking_mask = thinking_mask.to(device=embeds.device, dtype=torch.bool)
+                replacement_embeds = inputs_embeds.to(device=embeds.device, dtype=embeds.dtype)
+                thinking_pos = thinking_mask.nonzero(as_tuple=True)
+                embeds = embeds.clone()
+                embeds[thinking_pos] = replacement_embeds[thinking_pos]
+            inputs_embeds = embeds
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)

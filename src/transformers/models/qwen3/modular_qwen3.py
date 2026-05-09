@@ -20,7 +20,7 @@ import torch
 
 from ...cache_utils import Cache
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_outputs import CausalLMOutputWithPast
+from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, logging
@@ -119,7 +119,44 @@ class Qwen3PreTrainedModel(Qwen2PreTrainedModel):
 
 
 class Qwen3Model(Qwen2Model):
-    pass
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        thinking_mask: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPast:
+        if input_ids is not None and inputs_embeds is not None:
+            if thinking_mask is None:
+                raise ValueError(
+                    "You cannot specify both input_ids and inputs_embeds "
+                    "unless thinking_mask is provided"
+                )
+            if thinking_mask.shape != input_ids.shape:
+                raise ValueError("thinking_mask must have the same shape as input_ids")
+            embeds = self.embed_tokens(input_ids)
+            thinking_mask = thinking_mask.to(device=embeds.device, dtype=torch.bool)
+            replacement_embeds = inputs_embeds.to(device=embeds.device, dtype=embeds.dtype)
+            thinking_pos = thinking_mask.nonzero(as_tuple=True)
+            embeds = embeds.clone()
+            embeds[thinking_pos] = replacement_embeds[thinking_pos]
+            input_ids = None
+            inputs_embeds = embeds
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
 
 
 class Qwen3ForCausalLM(Qwen2ForCausalLM):
